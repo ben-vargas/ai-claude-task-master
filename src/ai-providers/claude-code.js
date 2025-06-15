@@ -1,4 +1,3 @@
-import { execSync } from 'child_process';
 import {
 	createClaudeCode,
 	isAuthenticationError,
@@ -17,22 +16,6 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 		super();
 		this.name = 'ClaudeCode';
 		this.supportedModels = ['opus', 'sonnet'];
-	}
-
-	/**
-	 * Checks if Claude Code CLI is installed and accessible
-	 */
-	checkCLIInstallation() {
-		try {
-			execSync('claude --version', { encoding: 'utf8' });
-			return true;
-		} catch (error) {
-			log(
-				'warn',
-				'Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code'
-			);
-			return false;
-		}
 	}
 
 	/**
@@ -135,35 +118,5 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 		} catch (error) {
 			throw error;
 		}
-	}
-
-	/**
-	 * Override generateText to check CLI installation
-	 */
-	async generateText(params) {
-		if (!this.checkCLIInstallation()) {
-			throw new Error('Claude Code CLI is not installed');
-		}
-		return super.generateText(params);
-	}
-
-	/**
-	 * Override streamText to check CLI installation
-	 */
-	async streamText(params) {
-		if (!this.checkCLIInstallation()) {
-			throw new Error('Claude Code CLI is not installed');
-		}
-		return super.streamText(params);
-	}
-
-	/**
-	 * Override generateObject to check CLI installation
-	 */
-	async generateObject(params) {
-		if (!this.checkCLIInstallation()) {
-			throw new Error('Claude Code CLI is not installed');
-		}
-		return super.generateObject(params);
 	}
 }
