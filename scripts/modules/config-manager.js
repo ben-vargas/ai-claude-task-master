@@ -422,7 +422,7 @@ function getVertexLocation(explicitRoot = null) {
  */
 function getClaudeCodeConfig(explicitRoot = null) {
 	// Return Claude Code specific configuration with defaults
-	const config = getGlobalConfig(explicitRoot);
+	const config = getConfig(explicitRoot);
 	const claudeCodeConfig = config.claudeCode || {};
 
 	return claudeCodeConfig;

@@ -483,6 +483,11 @@ async function _unifiedServiceRunner(serviceType, params) {
 			if (providerName?.toLowerCase() === 'claude-code') {
 				// Get Claude Code configuration
 				const claudeCodeConfig = getClaudeCodeConfig(effectiveProjectRoot);
+				
+				log(
+					'debug',
+					`Raw Claude Code config from getClaudeCodeConfig: ${JSON.stringify(claudeCodeConfig)}`
+				);
 
 				// Add Claude Code-specific parameters
 				providerSpecificParams = {

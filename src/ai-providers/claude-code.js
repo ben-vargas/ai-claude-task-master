@@ -1,5 +1,10 @@
 import { execSync } from 'child_process';
-import { createClaudeCode } from 'ai-sdk-provider-claude-code';
+import { 
+	createClaudeCode, 
+	isAuthenticationError, 
+	isTimeoutError,
+	getErrorMetadata 
+} from 'ai-sdk-provider-claude-code';
 import { log } from '../../scripts/modules/index.js';
 import { BaseAIProvider } from './base-provider.js';
 
@@ -15,10 +20,65 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 	}
 
 	/**
+	 * Tries to find the actual path to the claude executable
+	 */
+	findClaudePath() {
+		// First, try to find npm global installation
+		try {
+			const npmPrefix = execSync('npm prefix -g', { encoding: 'utf8' }).trim();
+			const npmClaudePath = `${npmPrefix}/bin/claude`;
+			execSync(`test -x "${npmClaudePath}"`, { encoding: 'utf8' });
+			log('debug', `Found claude at npm global: ${npmClaudePath}`);
+			return npmClaudePath;
+		} catch (error) {
+			// npm global claude not found
+		}
+		
+		try {
+			// Try to find claude using 'which' command
+			const path = execSync('which claude', { encoding: 'utf8' }).trim();
+			if (path) {
+				log('debug', `Found claude at: ${path}`);
+				return path;
+			}
+		} catch (error) {
+			// which command failed, claude not in PATH
+		}
+		
+		// Check common installation locations
+		const home = process.env.HOME || process.env.USERPROFILE;
+		const commonPaths = [
+			home + '/.claude/local/claude', // User's local claude installation
+			home + '/.claude/local/node_modules/.bin/claude', // Direct path to claude binary
+			'/usr/local/bin/claude',
+			'/opt/homebrew/bin/claude',
+			home + '/.nvm/versions/node/v22.14.0/bin/claude', // Specific nvm path
+			home + '/.bun/bin/claude' // Lower priority for bun
+		].filter(Boolean); // Remove any undefined paths
+		
+		for (const path of commonPaths) {
+			try {
+				execSync(`test -x "${path}"`, { encoding: 'utf8' });
+				log('debug', `Found claude at: ${path}`);
+				return path;
+			} catch (error) {
+				// Path doesn't exist or isn't executable
+			}
+		}
+		
+		return null;
+	}
+
+	/**
 	 * Checks if Claude Code CLI is installed and accessible
 	 */
 	checkCLIInstallation() {
 		try {
+			const claudePath = this.findClaudePath();
+			if (claudePath) {
+				execSync(`"${claudePath}" --version`, { encoding: 'utf8' });
+				return true;
+			}
 			execSync('claude --version', { encoding: 'utf8' });
 			return true;
 		} catch (error) {
@@ -36,13 +96,18 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 	async handleError(operation, error) {
 		const errorMessage = error.message?.toLowerCase() || '';
 
-		// Check for authentication errors
-		if (
-			errorMessage.includes('not authenticated') ||
-			errorMessage.includes('auth_required') ||
-			error.code === 'AUTH_REQUIRED'
-		) {
+		// Use the new error checking functions from ai-sdk-provider-claude-code
+		if (isAuthenticationError(error)) {
 			throw new Error('Claude Code authentication required. Run: claude login');
+		}
+
+		// Check for timeout errors using the new function
+		if (isTimeoutError(error)) {
+			const metadata = getErrorMetadata(error);
+			const timeoutMs = metadata?.timeoutMs || 120000;
+			throw new Error(
+				`Request timed out after ${timeoutMs}ms. Consider increasing timeout in config.json`
+			);
 		}
 
 		// Check for CLI not found errors
@@ -56,11 +121,10 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 			);
 		}
 
-		// Check for timeout errors
-		if (errorMessage.includes('timeout') || error.code === 'TIMEOUT') {
-			throw new Error(
-				'Request timed out. Increase timeoutMs in config.json (default: 120000ms, max: 600000ms)'
-			);
+		// Get additional error metadata if available
+		const metadata = getErrorMetadata(error);
+		if (metadata?.stderr) {
+			log('error', `Claude Code stderr: ${metadata.stderr}`);
 		}
 
 		// For other errors, use base class handling
@@ -94,20 +158,39 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 	 * Creates and returns a Claude Code client instance
 	 */
 	getClient(params) {
-		const config = {
-			timeoutMs: params.timeoutMs || 120000,
-			skipPermissions: params.skipPermissions || false,
-			maxConcurrentProcesses: params.maxConcurrentProcesses || 4,
-			cliPath: params.cliPath || 'claude'
+		// Find the claude executable path
+		const claudePath = params.cliPath || this.findClaudePath() || 'claude';
+		log('debug', `Using Claude Code executable at: ${claudePath}`);
+		
+		// Map task-master params to ai-sdk-provider-claude-code settings
+		const settings = {
+			// Map cliPath to pathToClaudeCodeExecutable
+			pathToClaudeCodeExecutable: claudePath,
+			
+			// Map skipPermissions to permissionMode
+			permissionMode: params.skipPermissions ? 'bypassPermissions' : 'default',
+			
+			// Include only valid ClaudeCodeSettings properties
+			cwd: params.cwd,
+			customSystemPrompt: params.customSystemPrompt,
+			appendSystemPrompt: params.appendSystemPrompt,
+			maxTurns: params.maxTurns,
+			maxThinkingTokens: params.maxThinkingTokens
 		};
 
-		try {
-			const client = createClaudeCode(config);
+		// Remove undefined values
+		Object.keys(settings).forEach(key => {
+			if (settings[key] === undefined) {
+				delete settings[key];
+			}
+		});
 
-			// Return a wrapped client that passes config to each model
-			return (modelId) => {
-				return client(modelId, config);
-			};
+		try {
+			// Create provider with settings directly (not wrapped in defaultSettings)
+			const provider = createClaudeCode(settings);
+			
+			// Return the provider directly - it's already a function that accepts modelId
+			return provider;
 		} catch (error) {
 			throw error;
 		}
