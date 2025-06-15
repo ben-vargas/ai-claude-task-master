@@ -434,7 +434,7 @@
 		},
 		{
 			"id": "sonnet",
-			"swe_score": 0.623,
+			"swe_score": 0.727,
 			"cost_per_1m_tokens": { "input": 0, "output": 0 },
 			"allowed_roles": ["main", "research", "fallback"],
 			"max_tokens": 64000
