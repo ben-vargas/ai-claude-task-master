@@ -688,6 +688,16 @@
 			},
 			"allowed_roles": ["main", "fallback"],
 			"max_tokens": 32768
+		},
+		{
+			"id": "moonshotai/kimi-k2",
+			"swe_score": 0.716,
+			"cost_per_1m_tokens": {
+				"input": 0.57,
+				"output": 2.3
+			},
+			"allowed_roles": ["main", "fallback"],
+			"max_tokens": 64000
 		}
 	],
 	"ollama": [
