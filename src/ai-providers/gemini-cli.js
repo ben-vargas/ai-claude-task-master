@@ -209,9 +209,56 @@ export class GeminiCliProvider extends BaseAIProvider {
 				return msg;
 			}
 
-			// For expand-task user messages, create a much simpler, more direct prompt
-			// that doesn't depend on specific task content
-			const simplifiedPrompt = `Generate exactly ${subtaskCount} subtasks in the following JSON format.
+			// Extract task information from the original user message
+			// Try multiple patterns as different prompts use different formats
+			let taskInfoMatch = msg.content.match(
+				/Task ID:\s*(\d+)\s*\nTitle:\s*(.+?)\s*\nDescription:\s*(.+?)(?:\n|$)/s
+			);
+
+			// Try alternate pattern for research mode
+			if (!taskInfoMatch) {
+				taskInfoMatch = msg.content.match(
+					/Parent Task:\s*\nID:\s*(\d+)\s*\nTitle:\s*(.+?)\s*\nDescription:\s*(.+?)(?:\n|$)/s
+				);
+			}
+
+			// Try another pattern
+			if (!taskInfoMatch) {
+				taskInfoMatch = msg.content.match(
+					/Task to expand:\s*ID:\s*(\d+)\s*Title:\s*(.+?)\s*Description:\s*(.+?)(?:\n|$)/s
+				);
+			}
+
+			let taskTitle = 'the given task';
+			let taskDescription = '';
+
+			if (taskInfoMatch) {
+				taskTitle = taskInfoMatch[2].trim();
+				taskDescription = taskInfoMatch[3].trim();
+				log(
+					'debug',
+					`${this.name} extracted task info - Title: "${taskTitle}", Description: "${taskDescription}"`
+				);
+			} else {
+				// Fallback: try to extract any meaningful task information
+				const titleMatch = msg.content.match(/Title:\s*(.+?)(?:\n|$)/);
+				const descMatch = msg.content.match(/Description:\s*(.+?)(?:\n|$)/);
+				
+				if (titleMatch) {
+					taskTitle = titleMatch[1].trim();
+				}
+				if (descMatch) {
+					taskDescription = descMatch[1].trim();
+				}
+				
+				log(
+					'warn',
+					`${this.name} could not extract task info with primary patterns, using fallback - Title: "${taskTitle}", Description: "${taskDescription}"`
+				);
+			}
+
+			// For expand-task user messages, create a simpler prompt that still includes task context
+			const simplifiedPrompt = `For the task "${taskTitle}" (${taskDescription}), generate exactly ${subtaskCount} subtasks in the following JSON format.
 
 CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanatory text, no "Here is", no "Of course", no markdown - just the JSON object.
 
@@ -223,17 +270,19 @@ Required JSON structure:
       "title": "Specific actionable task title",
       "description": "Clear task description",
       "dependencies": [],
-      "details": "Implementation details and guidance",
+      "details": "Implementation details and guidance", 
       "testStrategy": "Testing approach"
     }
   ]
 }
 
-Generate ${subtaskCount} subtasks based on the original task context. Return ONLY the JSON object.`;
+Generate ${subtaskCount} subtasks that are specific and relevant to "${taskTitle}". Each subtask should help complete the main task: ${taskDescription}
+
+Return ONLY the JSON object.`;
 
 			log(
 				'debug',
-				`${this.name} simplified user prompt for better JSON compliance`
+				`${this.name} simplified user prompt while preserving task context for: ${taskTitle}`
 			);
 			return { ...msg, content: simplifiedPrompt };
 		});
