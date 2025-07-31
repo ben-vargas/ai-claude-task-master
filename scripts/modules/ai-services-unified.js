@@ -26,7 +26,8 @@ import {
 	getVertexLocation,
 	getVertexProjectId,
 	isApiKeySet,
-	providersWithoutApiKeys
+	providersWithoutApiKeys,
+	checkClaudeCodeApiKeyPrecedence
 } from './config-manager.js';
 import {
 	findProjectRoot,
@@ -181,6 +182,9 @@ function _getTagInfo(projectRoot) {
 // --- Configuration for Retries ---
 const MAX_RETRIES = 2;
 const INITIAL_RETRY_DELAY_MS = 1000;
+
+// --- Session-level Warning Tracking ---
+let claudeCodePrecedenceWarningShown = false;
 
 // Helper function to check if an error is retryable
 function isRetryableError(error) {
@@ -393,6 +397,15 @@ async function _unifiedServiceRunner(serviceType, params) {
 
 	const effectiveProjectRoot = projectRoot || findProjectRoot();
 	const userId = getUserId(effectiveProjectRoot);
+
+	// Check for Claude Code API key precedence issue and warn user if needed
+	if (!claudeCodePrecedenceWarningShown) {
+		const precedenceCheck = checkClaudeCodeApiKeyPrecedence(effectiveProjectRoot, session);
+		if (precedenceCheck.hasWarning) {
+			log('warn', precedenceCheck.message);
+			claudeCodePrecedenceWarningShown = true; // Show warning only once per session
+		}
+	}
 
 	let sequence;
 	if (initialRole === 'main') {

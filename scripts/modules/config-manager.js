@@ -932,6 +932,56 @@ function getBaseUrlForRole(role, explicitRoot = null) {
 	return undefined;
 }
 
+/**
+ * Checks if ANTHROPIC_API_KEY is set and a claude-code provider model is configured,
+ * which can cause precedence issues with Claude Code SDK OAuth authentication.
+ * @param {string|null} explicitRoot - Optional explicit path to the project root.
+ * @param {object|null} session - Optional MCP session object.
+ * @returns {{hasWarning: boolean, message: string|null}} Warning information
+ */
+function checkClaudeCodeApiKeyPrecedence(explicitRoot = null, session = null) {
+	// Check if ANTHROPIC_API_KEY is set in environment
+	const anthropicApiKey = resolveEnvVariable('ANTHROPIC_API_KEY', session, explicitRoot);
+	
+	if (!anthropicApiKey || anthropicApiKey.trim() === '') {
+		return { hasWarning: false, message: null };
+	}
+
+	// Check if any configured model role uses claude-code provider
+	const roles = ['main', 'research', 'fallback'];
+	const claudeCodeRoles = [];
+
+	for (const role of roles) {
+		let provider;
+		if (role === 'main') {
+			provider = getMainProvider(explicitRoot);
+		} else if (role === 'research') {
+			provider = getResearchProvider(explicitRoot);
+		} else if (role === 'fallback') {
+			provider = getFallbackProvider(explicitRoot);
+		}
+
+		if (provider && provider.toLowerCase() === 'claude-code') {
+			claudeCodeRoles.push(role);
+		}
+	}
+
+	if (claudeCodeRoles.length === 0) {
+		return { hasWarning: false, message: null };
+	}
+
+	const rolesText = claudeCodeRoles.length === 1 
+		? `'${claudeCodeRoles[0]}' role` 
+		: `roles: ${claudeCodeRoles.map(r => `'${r}'`).join(', ')}`;
+
+	const message = `WARNING: ANTHROPIC_API_KEY environment variable is set, and you have configured claude-code provider for ${rolesText}. ` +
+		`The Claude Code SDK gives precedence to ANTHROPIC_API_KEY over Pro/Max OAuth authentication. ` +
+		`If you're not using APIs with Claude Code and want to use your Pro/Max subscription, ` +
+		`please unset the ANTHROPIC_API_KEY environment variable.`;
+
+	return { hasWarning: true, message };
+}
+
 // Export the providers without API keys array for use in other modules
 export const providersWithoutApiKeys = [
 	CUSTOM_PROVIDERS.OLLAMA,
@@ -988,6 +1038,8 @@ export {
 	// API Key Checkers (still relevant)
 	isApiKeySet,
 	getMcpApiKeyStatus,
+	// Claude Code precedence warning
+	checkClaudeCodeApiKeyPrecedence,
 	// ADD: Function to get all provider names
 	getAllProviders,
 	getVertexProjectId,
