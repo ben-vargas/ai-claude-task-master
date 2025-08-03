@@ -2,10 +2,10 @@
  * src/ai-providers/claude-code.js
  *
  * Implementation for interacting with Claude models via Claude Code CLI
- * using a custom AI SDK implementation.
+ * using the ai-sdk-provider-claude-code npm package.
  */
 
-import { createClaudeCode } from './custom-sdk/claude-code/index.js';
+import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import { BaseAIProvider } from './base-provider.js';
 import { getClaudeCodeSettingsForCommand } from '../../scripts/modules/config-manager.js';
 
@@ -43,9 +43,12 @@ export class ClaudeCodeProvider extends BaseAIProvider {
 	getClient(params) {
 		try {
 			// Claude Code doesn't use API keys or base URLs
-			// Just return the provider factory
+			// Get settings for the specific command if provided
+			const settings = getClaudeCodeSettingsForCommand(params?.commandName);
+			
+			// Create the provider with the settings
 			return createClaudeCode({
-				defaultSettings: getClaudeCodeSettingsForCommand(params?.commandName)
+				defaultSettings: settings
 			});
 		} catch (error) {
 			this.handleError('client initialization', error);

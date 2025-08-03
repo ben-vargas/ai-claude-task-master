@@ -590,7 +590,7 @@ async function _unifiedServiceRunner(serviceType, params) {
 			const callParams = {
 				apiKey,
 				modelId,
-				maxTokens: roleParams.maxTokens,
+				maxOutputTokens: roleParams.maxTokens, // v5 uses maxOutputTokens
 				temperature: roleParams.temperature,
 				messages,
 				...(baseURL && { baseURL }),

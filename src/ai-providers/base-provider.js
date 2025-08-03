@@ -43,7 +43,7 @@ export class BaseAIProvider {
 	}
 
 	/**
-	 * Validates optional parameters like temperature and maxTokens
+	 * Validates optional parameters like temperature and maxOutputTokens
 	 * @param {object} params - Parameters to validate
 	 */
 	validateOptionalParams(params) {
@@ -53,8 +53,8 @@ export class BaseAIProvider {
 		) {
 			throw new Error('Temperature must be between 0 and 1');
 		}
-		if (params.maxTokens !== undefined && params.maxTokens <= 0) {
-			throw new Error('maxTokens must be greater than 0');
+		if (params.maxOutputTokens !== undefined && params.maxOutputTokens <= 0) {
+			throw new Error('maxOutputTokens must be greater than 0');
 		}
 	}
 
@@ -131,7 +131,7 @@ export class BaseAIProvider {
 			const result = await generateText({
 				model: client(params.modelId),
 				messages: params.messages,
-				maxTokens: params.maxTokens,
+				maxOutputTokens: params.maxOutputTokens,
 				temperature: params.temperature
 			});
 
@@ -143,8 +143,8 @@ export class BaseAIProvider {
 			return {
 				text: result.text,
 				usage: {
-					inputTokens: result.usage?.promptTokens,
-					outputTokens: result.usage?.completionTokens,
+					inputTokens: result.usage?.inputTokens,
+					outputTokens: result.usage?.outputTokens,
 					totalTokens: result.usage?.totalTokens
 				}
 			};
@@ -167,7 +167,7 @@ export class BaseAIProvider {
 			const stream = await streamText({
 				model: client(params.modelId),
 				messages: params.messages,
-				maxTokens: params.maxTokens,
+				maxOutputTokens: params.maxOutputTokens,
 				temperature: params.temperature
 			});
 
@@ -208,7 +208,7 @@ export class BaseAIProvider {
 				messages: params.messages,
 				schema: params.schema,
 				mode: 'auto',
-				maxTokens: params.maxTokens,
+				maxOutputTokens: params.maxOutputTokens,
 				temperature: params.temperature
 			});
 
@@ -220,8 +220,8 @@ export class BaseAIProvider {
 			return {
 				object: result.object,
 				usage: {
-					inputTokens: result.usage?.promptTokens,
-					outputTokens: result.usage?.completionTokens,
+					inputTokens: result.usage?.inputTokens,
+					outputTokens: result.usage?.outputTokens,
 					totalTokens: result.usage?.totalTokens
 				}
 			};

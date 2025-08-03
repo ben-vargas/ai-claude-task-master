@@ -49,10 +49,7 @@ export class AnthropicAIProvider extends BaseAIProvider {
 
 			return createAnthropic({
 				apiKey,
-				...(baseURL && { baseURL }),
-				headers: {
-					'anthropic-beta': 'output-128k-2025-02-19'
-				}
+				...(baseURL && { baseURL })
 			});
 		} catch (error) {
 			this.handleError('client initialization', error);
