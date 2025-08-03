@@ -86,6 +86,39 @@ export class GeminiCliProvider extends BaseAIProvider {
 	}
 
 	/**
+	 * Extracts system messages from the messages array and returns them separately.
+	 * This is needed because ai-sdk-provider-gemini-cli expects system prompts as a separate parameter.
+	 * @param {Array} messages - Array of message objects
+	 * @param {Object} options - Options for system prompt enhancement
+	 * @param {boolean} options.enforceJsonOutput - Whether to add JSON enforcement to system prompt
+	 * @returns {Object} - {systemPrompt: string|undefined, messages: Array}
+	 */
+	_extractSystemMessage(messages, options = {}) {
+		if (!messages || !Array.isArray(messages)) {
+			return { systemPrompt: undefined, messages: messages || [] };
+		}
+
+		const systemMessages = messages.filter((msg) => msg.role === 'system');
+		const nonSystemMessages = messages.filter((msg) => msg.role !== 'system');
+
+		// Combine multiple system messages if present
+		let systemPrompt =
+			systemMessages.length > 0
+				? systemMessages.map((msg) => msg.content).join('\n\n')
+				: undefined;
+
+		// Add Gemini CLI specific JSON enforcement if requested
+		if (options.enforceJsonOutput) {
+			const jsonEnforcement = this._getJsonEnforcementPrompt();
+			systemPrompt = systemPrompt
+				? `${systemPrompt}\n\n${jsonEnforcement}`
+				: jsonEnforcement;
+		}
+
+		return { systemPrompt, messages: nonSystemMessages };
+	}
+
+	/**
 	 * Gets a Gemini CLI specific system prompt to enforce strict JSON output
 	 * @returns {string} JSON enforcement system prompt
 	 */
@@ -155,9 +188,77 @@ export class GeminiCliProvider extends BaseAIProvider {
 			systemMsg.content.includes(
 				'You are an AI assistant helping with task breakdown. Generate exactly'
 			);
+		
+		// Check if this is a parse-prd operation
+		const isParsePRD = 
+			systemMsg && 
+			(systemMsg.content.includes('Product Requirements Document') ||
+			 systemMsg.content.includes('PRD') ||
+			 systemMsg.content.includes('generate tasks from'));
 
-		if (!isExpandTask) {
-			return messages; // Not an expand task, return unchanged
+		if (!isExpandTask && !isParsePRD) {
+			return messages; // Not a special operation, return unchanged
+		}
+		
+		if (isParsePRD) {
+			// For parse-prd, we DON'T want to replace the entire user prompt
+			// because it contains the actual PRD content
+			// We just want to add JSON formatting instructions
+			log(
+				'debug',
+				`${this.name} detected parse-prd operation, adding JSON format instructions`
+			);
+			
+			return messages.map((msg) => {
+				if (msg.role !== 'user') {
+					return msg;
+				}
+				
+				// Get the original PRD content
+				const originalContent = msg.content;
+				
+				// Extract task count from system message
+				const taskCountMatch = systemMsg.content.match(/(\d+)\s+tasks/);
+				const taskCount = taskCountMatch ? taskCountMatch[1] : '25';
+				
+				// Prepend JSON formatting instructions while keeping PRD content
+				const enhancedPrompt = `CRITICAL: You must respond with ONLY valid JSON. No markdown code blocks, no explanations, no text before or after - just the JSON object.
+
+Required JSON structure:
+{
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Task title",
+      "description": "Task description",
+      "status": "pending",
+      "dependencies": [],
+      "priority": "high",
+      "details": "Implementation details as a plain string",
+      "testStrategy": "Testing approach"
+    }
+  ],
+  "metadata": {
+    "projectName": "Project name from PRD",
+    "totalTasks": ${taskCount},
+    "sourceFile": "prd.txt",
+    "generatedAt": "2024-01-01"
+  }
+}
+
+IMPORTANT: The details field must be a plain string, not an object or array.
+Generate exactly ${taskCount} tasks. Return ONLY the JSON object.
+
+Now, here is the PRD to parse:
+
+${originalContent}`;
+				
+				log(
+					'debug',
+					`${this.name} added JSON format instructions while preserving PRD content`
+				);
+				return { ...msg, content: enhancedPrompt };
+			});
 		}
 
 		// Extract subtask count from system message
@@ -176,16 +277,17 @@ export class GeminiCliProvider extends BaseAIProvider {
 				return msg;
 			}
 
-			// For expand-task user messages, create a much simpler, more direct prompt
-			const simplifiedPrompt = `Generate exactly ${subtaskCount} subtasks in the following JSON format.
-
-CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanatory text, no "Here is", no "Of course", no markdown - just the JSON object.
+			// Extract the original task context from the user message
+			const originalContent = msg.content;
+			
+			// For expand-task user messages, PREPEND format instructions while KEEPING the task context
+			const simplifiedPrompt = `CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanatory text, no "Here is", no "Of course", no markdown - just the JSON object.
 
 Required JSON structure:
 {
   "subtasks": [
     {
-      "id": "1",
+      "id": 1,
       "title": "Specific actionable task title",
       "description": "Clear task description",
       "dependencies": [],
@@ -197,12 +299,15 @@ Required JSON structure:
 }
 
 IMPORTANT: The "details" field must be a plain string, not an object or array.
+Generate exactly ${subtaskCount} subtasks. Return ONLY the JSON object.
 
-Generate ${subtaskCount} subtasks based on the original task context. Return ONLY the JSON object.`;
+Now, here is the task to expand:
+
+${originalContent}`;
 
 			log(
 				'debug',
-				`${this.name} simplified user prompt for better JSON compliance`
+				`${this.name} added JSON format instructions while preserving task context`
 			);
 			return { ...msg, content: simplifiedPrompt };
 		});
@@ -323,6 +428,35 @@ Generate ${subtaskCount} subtasks based on the original task context. Return ONL
 	}
 
 	/**
+	 * Adds missing metadata for parse-prd operations
+	 * Gemini sometimes omits the metadata field even when explicitly requested
+	 */
+	_addMissingMetadata(obj, messages) {
+		// Check if this is a parse-prd operation by looking for tasks array
+		if (obj && obj.tasks && Array.isArray(obj.tasks) && !obj.metadata) {
+			// Extract task count from messages if possible
+			const systemMsg = messages?.find(m => m.role === 'system');
+			const taskCountMatch = systemMsg?.content?.match(/(\d+)\s+tasks/);
+			const taskCount = obj.tasks.length;
+			
+			log(
+				'debug',
+				`Adding missing metadata field for parse-prd operation with ${taskCount} tasks`
+			);
+			
+			// Add default metadata
+			obj.metadata = {
+				projectName: "Project",
+				totalTasks: taskCount,
+				sourceFile: "prd.txt",
+				generatedAt: new Date().toISOString()
+			};
+		}
+		
+		return obj;
+	}
+
+	/**
 	 * Generates text using Gemini CLI model
 	 * Overrides base implementation to properly handle system messages and enforce JSON output when needed
 	 */
@@ -368,41 +502,35 @@ Generate ${subtaskCount} subtasks based on the original task context. Return ONL
 					: jsonEnforcement;
 			}
 
-			// Build final messages - v5 requires all messages in array, system included
-			const finalMessages = [];
-			if (systemPrompt) {
-				finalMessages.push({ role: 'system', content: systemPrompt });
-			}
-			finalMessages.push(...nonSystemMessages);
-
+			// Use v4 approach: pass system as separate parameter, not in messages
 			const client = await this.getClient(params);
 			const result = await generateText({
 				model: client(params.modelId),
-				messages: finalMessages,
+				system: systemPrompt,  // v4 style: separate system parameter
+				messages: nonSystemMessages,  // Only non-system messages
 				maxOutputTokens: params.maxOutputTokens,
 				temperature: params.temperature
 			});
 
-			// If we detected a JSON request and gemini-cli returned conversational text,
-			// attempt to extract JSON from the response
+			// Always attempt JSON extraction for Gemini CLI (it often wraps in markdown)
 			let finalText = result.text;
-			if (enforceJsonOutput && result.text && !this._isValidJson(result.text)) {
-				log(
-					'debug',
-					`${this.name} response appears conversational, attempting JSON extraction`
-				);
-
+			if (enforceJsonOutput && result.text) {
+				// First try extraction (handles markdown wrappers, etc.)
 				const extractedJson = this.extractJson(result.text);
+				
 				if (this._isValidJson(extractedJson)) {
 					log(
 						'debug',
-						`${this.name} successfully extracted JSON from conversational response`
+						`${this.name} successfully extracted clean JSON`
 					);
 					finalText = extractedJson;
+				} else if (this._isValidJson(result.text)) {
+					// Original was already valid JSON
+					finalText = result.text;
 				} else {
 					log(
 						'debug',
-						`${this.name} JSON extraction failed, returning original response`
+						`${this.name} could not extract valid JSON`
 					);
 				}
 			}
@@ -444,17 +572,12 @@ Generate ${subtaskCount} subtasks based on the original task context. Return ONL
 				? systemMessages.map((msg) => msg.content).join('\n\n')
 				: undefined;
 
-			// Build final messages for v5
-			const finalMessages = [];
-			if (systemPrompt) {
-				finalMessages.push({ role: 'system', content: systemPrompt });
-			}
-			finalMessages.push(...nonSystemMessages);
-
+			// Use v4 approach: pass system as separate parameter
 			const client = await this.getClient(params);
 			const stream = await streamText({
 				model: client(params.modelId),
-				messages: finalMessages,
+				system: systemPrompt,  // v4 style: separate system parameter
+				messages: nonSystemMessages,  // Only non-system messages
 				maxOutputTokens: params.maxOutputTokens,
 				temperature: params.temperature
 			});
@@ -472,125 +595,121 @@ Generate ${subtaskCount} subtasks based on the original task context. Return ONL
 
 	/**
 	 * Generates a structured object using Gemini CLI model
-	 * Overrides base implementation to handle Gemini-specific JSON formatting issues
+	 * Completely overrides base implementation to avoid error logging on expected Gemini quirks
 	 */
 	async generateObject(params) {
 		try {
-			// First try the standard generateObject from base class
-			return await super.generateObject(params);
-		} catch (error) {
-			// If it's a JSON parsing error, try manual extraction approach
-			if (error.message?.includes('JSON') || error.message?.includes('parse') || error.message?.includes('object')) {
-				log(
-					'debug',
-					`Gemini CLI generateObject failed with parsing error, attempting manual extraction`
-				);
+			// Validate params first
+			this.validateParams(params);
+			this.validateMessages(params.messages);
 
-				try {
-					// Validate params first
-					this.validateParams(params);
-					this.validateMessages(params.messages);
-
-					if (!params.schema) {
-						throw new Error('Schema is required for object generation');
-					}
-					if (!params.objectName) {
-						throw new Error('Object name is required for object generation');
-					}
-
-					// Use generateText with JSON enforcement
-					const jsonEnforcement = this._getJsonEnforcementPrompt();
-					
-					// Extract system messages
-					const systemMessages = params.messages.filter((msg) => msg.role === 'system');
-					const nonSystemMessages = params.messages.filter((msg) => msg.role !== 'system');
-					
-					let systemPrompt = systemMessages.length > 0
-						? systemMessages.map((msg) => msg.content).join('\n\n')
-						: '';
-					
-					// Add JSON enforcement
-					systemPrompt = systemPrompt
-						? `${systemPrompt}\n\n${jsonEnforcement}`
-						: jsonEnforcement;
-
-					// Simplify if it's an expand-task
-					let processedMessages = params.messages;
-					if (this._detectJsonRequest(params.messages)) {
-						processedMessages = this._simplifyJsonPrompts(params.messages);
-					}
-
-					// Build final messages
-					const finalMessages = [
-						{ role: 'system', content: systemPrompt },
-						...processedMessages.filter(m => m.role !== 'system')
-					];
-
-					const client = await this.getClient(params);
-					const result = await generateText({
-						model: client(params.modelId),
-						messages: finalMessages,
-						maxOutputTokens: params.maxOutputTokens,
-						temperature: params.temperature
-					});
-					
-					// Check if we got a response
-					if (!result.text || result.text.trim() === '') {
-						log('error', 'Gemini CLI returned empty response in generateObject fallback');
-						throw new Error('Gemini CLI returned empty response');
-					}
-
-					// Extract JSON from the response
-					let extractedJson = result.text;
-					if (result.text && !this._isValidJson(result.text)) {
-						extractedJson = this.extractJson(result.text);
-						// If extraction didn't produce valid JSON, try the raw text again
-						if (!this._isValidJson(extractedJson)) {
-							extractedJson = result.text;
-						}
-					}
-
-					let parsedObject;
-					try {
-						parsedObject = JSON.parse(extractedJson);
-					} catch (parseError) {
-						log(
-							'error',
-							`Failed to parse extracted JSON: ${parseError.message}`
-						);
-						throw new Error(
-							`Gemini CLI returned invalid JSON that could not be parsed: ${parseError.message}`
-						);
-					}
-
-					// Normalize the response to fix common issues
-					parsedObject = this._normalizeGeminiResponse(parsedObject);
-
-					// Validate against schema
-					const validatedObject = params.schema.parse(parsedObject);
-
-					return {
-						object: validatedObject,
-						usage: {
-							inputTokens: result.usage?.inputTokens,
-							outputTokens: result.usage?.outputTokens,
-							totalTokens: result.usage?.totalTokens
-						}
-					};
-				} catch (retryError) {
-					log(
-						'error',
-						`Gemini CLI manual JSON extraction failed: ${retryError.message}`
-					);
-					// Re-throw the original error with more context
-					throw new Error(
-						`${this.name} failed to generate valid JSON object: ${error.message}`
-					);
-				}
+			if (!params.schema) {
+				throw new Error('Schema is required for object generation');
+			}
+			if (!params.objectName) {
+				throw new Error('Object name is required for object generation');
 			}
 
-			// For non-parsing errors, just re-throw
-			throw error;
+			log(
+				'debug',
+				`Generating ${this.name} object ('${params.objectName}') with model: ${params.modelId}`
+			);
+
+			// For Gemini, we know it often has issues with structured output,
+			// so we'll use generateText with JSON enforcement right away
+			// This avoids the error logging from trying generateObject first
+			
+			// Extract system messages for separate handling with JSON enforcement
+			const { systemPrompt: baseSystemPrompt, messages } = this._extractSystemMessage(
+				params.messages,
+				{ enforceJsonOutput: false }
+			);
+			
+			// Add strong JSON enforcement
+			const jsonEnforcement = this._getJsonEnforcementPrompt();
+			const systemPrompt = baseSystemPrompt
+				? `${baseSystemPrompt}\n\n${jsonEnforcement}`
+				: jsonEnforcement;
+
+			// Simplify prompts if needed (for expand-task, parse-prd, etc.)
+			let processedMessages = messages;
+			if (this._detectJsonRequest(params.messages)) {
+				processedMessages = this._simplifyJsonPrompts(params.messages);
+				// After simplification, filter out any system messages
+				processedMessages = processedMessages.filter(m => m.role !== 'system');
+			}
+
+			// Use v4 approach: generateText with separate system parameter
+			const client = await this.getClient(params);
+			const result = await generateText({
+				model: client(params.modelId),
+				system: systemPrompt,  // v4 style: separate system parameter
+				messages: processedMessages,
+				maxOutputTokens: params.maxOutputTokens,
+				temperature: params.temperature || 0.3  // Lower temp for structured output
+			});
+			
+			// Check if we got a response
+			if (!result.text || result.text.trim() === '') {
+				throw new Error('Gemini CLI returned empty response');
+			}
+
+			// Always try to extract JSON from the response (Gemini often wraps in markdown)
+			let extractedJson = this.extractJson(result.text);
+			
+			// If extraction failed, use original text
+			if (!this._isValidJson(extractedJson)) {
+				extractedJson = result.text;
+			}
+
+			let parsedObject;
+			try {
+				parsedObject = JSON.parse(extractedJson);
+			} catch (parseError) {
+				log(
+					'error',
+					`Failed to parse Gemini response as JSON: ${parseError.message}`
+				);
+				throw new Error(
+					`Gemini CLI returned invalid JSON that could not be parsed: ${parseError.message}`
+				);
+			}
+
+			// Normalize the response to fix common issues (e.g., object fields that should be strings)
+			parsedObject = this._normalizeGeminiResponse(parsedObject);
+			
+			// Add missing metadata if this is a parse-prd operation
+			// Gemini sometimes omits the metadata field even when explicitly requested
+			parsedObject = this._addMissingMetadata(parsedObject, params.messages);
+
+			// Validate against schema
+			let validatedObject;
+			try {
+				validatedObject = params.schema.parse(parsedObject);
+			} catch (validationError) {
+				// Log what we got vs what was expected for debugging
+				log(
+					'debug',
+					`Gemini response validation failed. Response keys: ${Object.keys(parsedObject).join(', ')}`
+				);
+				throw validationError;
+			}
+
+			log(
+				'debug',
+				`${this.name} generateObject completed successfully for model: ${params.modelId}`
+			);
+
+			return {
+				object: validatedObject,
+				usage: {
+					inputTokens: result.usage?.inputTokens,
+					outputTokens: result.usage?.outputTokens,
+					totalTokens: result.usage?.totalTokens
+				}
+			};
+		} catch (error) {
+			this.handleError('object generation', error);
 		}
 	}
 
