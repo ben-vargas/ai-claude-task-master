@@ -6,6 +6,7 @@
 import { spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { contextManager } from '../core/context-manager.js'; // Import the singleton
 import { fileURLToPath } from 'url';
 import packageJson from '../../../package.json' with { type: 'json' };
@@ -21,6 +22,163 @@ const __filename = fileURLToPath(import.meta.url);
 
 // Cache for version info to avoid repeated file reads
 let cachedVersionInfo = null;
+
+const REMOTE_URI_PREFIX = 'vscode-remote://';
+
+/**
+ * Converts VS Code remote URIs and other known remote path formats into local filesystem paths.
+ * Handles WSL, SSH remote, and UNC WSL share formats so the server can operate on real paths.
+ * @param {string} input - Raw path or URI string.
+ * @param {Object} [log] - Optional logger for warnings.
+ * @returns {string|null} Normalized path if conversion succeeds, otherwise null.
+ */
+function convertRemoteUriToPath(input, log) {
+	if (!input || typeof input !== 'string') {
+		return null;
+	}
+
+	try {
+		// Handle VS Code remote URIs (WSL, SSH, dev containers, etc.)
+		if (input.startsWith(REMOTE_URI_PREFIX)) {
+			const remoteUrl = new URL(input);
+			let remotePath = decodeURIComponent(remoteUrl.pathname || '');
+			if (!remotePath) {
+				return null;
+			}
+
+			// VS Code remote paths always begin with a slash. Keep it to maintain absolute POSIX paths.
+			return remotePath;
+		}
+
+		// Handle UNC-style WSL paths coming from Windows hosts (e.g. \\wsl$\Ubuntu\home\user)
+		const wslMatch = input.match(/^\\\\wsl\$[\\/]+([^\\/]+)[\\/](.*)$/i);
+		if (wslMatch) {
+			const distro = wslMatch[1];
+			const remainder = wslMatch[2].replace(/\\/g, '/');
+			return `/mnt/wsl/${distro}/${remainder}`;
+		}
+
+		return null;
+	} catch (error) {
+		if (log) {
+			log.warn(
+				`Failed to convert remote URI "${input}" to path: ${error.message}`
+			);
+		}
+		return null;
+	}
+}
+
+/**
+ * Expands a leading tilde to the current user's home directory.
+ * @param {string} input - Path string that may begin with '~'.
+ * @returns {string}
+ */
+function expandHomeDirectory(input) {
+	if (input.startsWith('~')) {
+		const home = os.homedir();
+		if (input === '~') {
+			return home;
+		}
+		return path.join(home, input.slice(1));
+	}
+	return input;
+}
+
+/**
+ * Checks whether a directory contains known Task Master project markers.
+ * @param {string} directory - Directory path to check.
+ * @returns {boolean}
+ */
+function directoryHasProjectMarkers(directory) {
+	try {
+		return PROJECT_MARKERS.some((marker) =>
+			fs.existsSync(path.join(directory, marker))
+		);
+	} catch (_error) {
+		return false;
+	}
+}
+
+/**
+ * Collects potential project root values from the MCP session and process environment.
+ * @param {Object} session - MCP session object.
+ * @returns {Array<{ value: string, source: string }>} Candidates with their origin description.
+ */
+function collectSessionRootCandidates(session) {
+	const candidates = [];
+	const seen = new Set();
+
+	const addCandidate = (value, source) => {
+		if (!value || typeof value !== 'string') return;
+		const key = `${source}:${value}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		candidates.push({ value, source });
+	};
+
+	// Session-provided workspace context (if any)
+	const workspaceFolders = session?.context?.workspaceFolders;
+	if (Array.isArray(workspaceFolders)) {
+		for (const folder of workspaceFolders) {
+			if (typeof folder === 'string') {
+				addCandidate(folder, 'session.context.workspaceFolders');
+			} else if (folder?.uri) {
+				addCandidate(folder.uri, 'session.context.workspaceFolders.uri');
+			} else if (folder?.path) {
+				addCandidate(folder.path, 'session.context.workspaceFolders.path');
+			}
+		}
+	}
+
+	if (session?.context?.workspace?.rootPath) {
+		addCandidate(
+			session.context.workspace.rootPath,
+			'session.context.workspace.rootPath'
+		);
+	}
+
+	if (session?.context?.workspaceFolder?.uri?.fsPath) {
+		addCandidate(
+			session.context.workspaceFolder.uri.fsPath,
+			'session.context.workspaceFolder.uri.fsPath'
+		);
+	}
+
+	if (session?.context?.workspaceFolder?.uri) {
+		addCandidate(
+			session.context.workspaceFolder.uri,
+			'session.context.workspaceFolder.uri'
+		);
+	}
+
+	// Session environment variables
+	const sessionEnv = session?.env || {};
+	const envKeys = [
+		'TASK_MASTER_PROJECT_ROOT',
+		'VSCODE_CWD',
+		'VSCODE_WORKSPACE_ROOT',
+		'WORKSPACE_ROOT',
+		'WORKSPACE_FOLDER',
+		'PWD',
+		'INIT_CWD'
+	];
+	for (const key of envKeys) {
+		if (sessionEnv[key]) {
+			addCandidate(sessionEnv[key], `session.env.${key}`);
+		}
+	}
+
+	// Process environment as a final fallback
+	const processEnvKeys = ['TASK_MASTER_PROJECT_ROOT', 'VSCODE_CWD', 'PWD', 'INIT_CWD'];
+	for (const key of processEnvKeys) {
+		if (process.env[key]) {
+			addCandidate(process.env[key], `process.env.${key}`);
+		}
+	}
+
+	return candidates;
+}
 
 /**
  * Get version information from package.json
@@ -192,7 +350,6 @@ function getProjectRootFromSession(session, log) {
 		);
 
 		let rawRootPath = null;
-		let decodedPath = null;
 		let finalPath = null;
 
 		// Check primary location
@@ -209,30 +366,52 @@ function getProjectRootFromSession(session, log) {
 		}
 
 		if (rawRootPath) {
-			// Decode URI and strip file:// protocol
-			decodedPath = rawRootPath.startsWith('file://')
-				? decodeURIComponent(rawRootPath.slice(7))
-				: rawRootPath; // Assume non-file URI is already decoded? Or decode anyway? Let's decode.
-			if (!rawRootPath.startsWith('file://')) {
-				decodedPath = decodeURIComponent(rawRootPath); // Decode even if no file://
+			finalPath = normalizeProjectRoot(rawRootPath, log);
+			if (finalPath) {
+				log.info(
+					`Normalized project root from session.roots: ${finalPath}`
+				);
+				return finalPath;
+			}
+		}
+
+		// Attempt to derive root from other session hints before falling back to generic heuristics
+		const sessionCandidates = collectSessionRootCandidates(session);
+		if (sessionCandidates.length > 0) {
+			const resolvedCandidates = sessionCandidates
+				.map((candidate) => {
+					const normalized = normalizeProjectRoot(candidate.value, log);
+					if (!normalized) return null;
+					const exists = fs.existsSync(normalized);
+					const hasMarkers = exists && directoryHasProjectMarkers(normalized);
+					return {
+						normalized,
+						source: candidate.source,
+						exists,
+						hasMarkers
+					};
+				})
+				.filter(Boolean);
+
+			const prioritized = resolvedCandidates.find(
+				(candidate) => candidate.exists && candidate.hasMarkers
+			);
+			if (prioritized) {
+				log.info(
+					`Using project root from ${prioritized.source}: ${prioritized.normalized}`
+				);
+				return prioritized.normalized;
 			}
 
-			// Handle potential Windows drive prefix after stripping protocol (e.g., /C:/...)
-			if (
-				decodedPath.startsWith('/') &&
-				/[A-Za-z]:/.test(decodedPath.substring(1, 3))
-			) {
-				decodedPath = decodedPath.substring(1); // Remove leading slash if it's like /C:/...
+			const existingCandidate = resolvedCandidates.find(
+				(candidate) => candidate.exists
+			);
+			if (existingCandidate) {
+				log.info(
+					`Using project root from ${existingCandidate.source}: ${existingCandidate.normalized}`
+				);
+				return existingCandidate.normalized;
 			}
-
-			log.info(`Decoded path: ${decodedPath}`);
-
-			// Normalize slashes and resolve
-			const normalizedSlashes = decodedPath.replace(/\\/g, '/');
-			finalPath = path.resolve(normalizedSlashes); // Resolve to absolute path for current OS
-
-			log.info(`Normalized and resolved session path: ${finalPath}`);
-			return finalPath;
 		}
 
 		// Fallback Logic (remains the same)
@@ -607,8 +786,13 @@ function normalizeProjectRoot(rawPath, log) {
 		let pathString = Array.isArray(rawPath) ? rawPath[0] : String(rawPath);
 		if (!pathString) return null;
 
-		// 1. Decode URI Encoding
-		// Use try-catch for decoding as malformed URIs can throw
+		// Convert remote-specific URIs (e.g., vscode-remote://) into filesystem paths
+		const remoteConverted = convertRemoteUriToPath(pathString, log);
+		if (remoteConverted) {
+			pathString = remoteConverted;
+		}
+
+		// 1. Decode URI encoding when possible. Some remotes double-encode so retry fallback is safe.
 		try {
 			pathString = decodeURIComponent(pathString);
 		} catch (decodeError) {
@@ -616,31 +800,45 @@ function normalizeProjectRoot(rawPath, log) {
 				log.warn(
 					`Could not decode URI component for path "${rawPath}": ${decodeError.message}. Proceeding with raw string.`
 				);
-			// Proceed with the original string if decoding fails
 			pathString = Array.isArray(rawPath) ? rawPath[0] : String(rawPath);
 		}
 
 		// 2. Strip file:// prefix (handle 2 or 3 slashes)
 		if (pathString.startsWith('file:///')) {
-			pathString = pathString.slice(7); // Slice 7 for file:///, may leave leading / on Windows
+			pathString = pathString.slice(7);
 		} else if (pathString.startsWith('file://')) {
-			pathString = pathString.slice(7); // Slice 7 for file://
+			pathString = pathString.slice(7);
 		}
 
-		// 3. Handle potential Windows leading slash after stripping prefix (e.g., /C:/...)
-		// This checks if it starts with / followed by a drive letter C: D: etc.
+		// 3. Expand ~ to the user home directory
+		pathString = expandHomeDirectory(pathString);
+
+		// 4. Handle potential Windows leading slash after stripping prefix (e.g., /C:/...)
 		if (
 			pathString.startsWith('/') &&
 			/[A-Za-z]:/.test(pathString.substring(1, 3))
 		) {
-			pathString = pathString.substring(1); // Remove the leading slash
+			pathString = pathString.substring(1);
 		}
 
-		// 4. Normalize backslashes to forward slashes
+		// 5. Normalize backslashes to forward slashes
 		pathString = pathString.replace(/\\/g, '/');
 
-		// 5. Resolve to absolute path using server's OS convention
-		const resolvedPath = path.resolve(pathString);
+		// 6. Handle Windows drive letters explicitly so they resolve correctly in POSIX environments
+		if (/^[A-Za-z]:/.test(pathString)) {
+			if (process.platform === 'win32') {
+				return path.win32.normalize(pathString);
+			}
+			const driveLetter = pathString[0].toLowerCase();
+			const remainder = pathString.slice(2).replace(/^\/+/, '');
+			const translated = `/mnt/${driveLetter}/${remainder}`;
+			return translated.replace(/\/{2,}/g, '/');
+		}
+
+		// 7. Resolve to absolute path using server's OS convention
+		const resolvedPath = path.isAbsolute(pathString)
+			? path.resolve(pathString)
+			: path.resolve(process.cwd(), pathString);
 		return resolvedPath;
 	} catch (error) {
 		if (log) {
